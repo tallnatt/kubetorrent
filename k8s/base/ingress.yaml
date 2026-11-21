@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: kubetorrent-ingress
+  namespace: kubetorrent
+  annotations:
+    # Adjust for your ingress controller / cert-manager issuer
+    nginx.ingress.kubernetes.io/proxy-body-size: "64m"
+spec:
+  tls:
+    - hosts:
+        - torrent.example.com
+      secretName: kubetorrent-tls
+  rules:
+    - host: torrent.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: kubetorrent-portal
+                port:
+                  name: http

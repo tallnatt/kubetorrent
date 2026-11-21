@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KubeTorrent — Account &amp; Passkeys</title>
+  <link rel="stylesheet" href="/portal/styles.css" />
+</head>
+<body>
+  <main class="card card-wide">
+    <div class="header-row">
+      <div class="brand" style="margin-bottom:0">
+        <div class="brand-icon">KT</div>
+        <div>
+          <h1 id="username-heading">Account</h1>
+          <p class="subtitle" style="margin-bottom:0">Manage Passkeys, password, and session</p>
+        </div>
+      </div>
+      <button id="logout-btn" class="btn btn-secondary" style="width:auto">Sign Out</button>
+    </div>
+
+    <div class="actions-row">
+      <a href="/" class="btn btn-primary">Open qBittorrent WebUI</a>
+    </div>
+
+    <div class="section">
+      <h2>Passkeys</h2>
+      <div id="passkey-list" class="passkey-list"></div>
+      <form id="register-passkey-form" class="inline-form">
+        <input id="passkey-name" type="text" placeholder="Passkey label (e.g. MacBook TouchID)" />
+        <button type="submit" class="btn btn-secondary">Register Passkey</button>
+      </form>
+    </div>
+
+    <div class="section">
+      <h2>Change Password</h2>
+      <form id="password-form">
+        <div class="field">
+          <label for="new-password">New Password (min 8 characters)</label>
+          <input id="new-password" type="password" minlength="8" required />
+        </div>
+        <button type="submit" class="btn btn-secondary">Update Password</button>
+      </form>
+    </div>
+
+    <div id="status" class="status" role="alert"></div>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    function showStatus(msg, type) {
+      statusEl.textContent = msg;
+      statusEl.className = "status " + type;
+    }
+
+    function b64urlToBuf(b64url) {
+      const pad = "=".repeat((4 - (b64url.length % 4)) % 4);
+      const b64 = (b64url + pad).replace(/-/g, "+").replace(/_/g, "/");
+      const bin = atob(b64);
+      const buf = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      return buf.buffer;
+    }
+
+    function bufToB64url(buf) {
+      const bytes = new Uint8Array(buf);
+      let bin = "";
+      for (const b of bytes) bin += String.fromCharCode(b);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    async function loadMe() {
+      const res = await fetch("/auth/me");
+      if (!res.ok) {
+        window.location.href = "/login";
+        return;
+      }
+      const data = await res.json();
+      document.getElementById("username-heading").textContent = data.username;
+      const listEl = document.getElementById("passkey-list");
+      listEl.innerHTML = "";
+      if (!data.passkeys || data.passkeys.length === 0) {
+        listEl.innerHTML = '<p class="subtitle" style="margin-bottom:0">No passkeys registered yet.</p>';
+        return;
+      }
+      for (const pk of data.passkeys) {
+        const item = document.createElement("div");
+        item.className = "passkey-item";
+        const info = document.createElement("div");
+        const title = document.createElement("div");
+        title.textContent = pk.name;
+        const meta = document.createElement("div");
+        meta.className = "passkey-meta";
+        meta.textContent = "Added " + new Date(pk.created_at).toLocaleDateString();
+        info.appendChild(title);
+        info.appendChild(meta);
+
+        const delBtn = document.createElement("button");
+        delBtn.className = "btn btn-danger";
+        delBtn.textContent = "Remove";
+        delBtn.onclick = async () => {
+          const r = await fetch("/auth/passkey/delete", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: pk.id }),
+          });
+          if (r.ok) {
+            showStatus("Passkey removed.", "success");
+            loadMe();
+          } else {
+            showStatus("Failed to remove passkey.", "error");
+          }
+        };
+
+        item.appendChild(info);
+        item.appendChild(delBtn);
+        listEl.appendChild(item);
+      }
+    }
+
+    document.getElementById("register-passkey-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      if (!window.PublicKeyCredential) {
+        showStatus("Passkeys are not supported in this browser.", "error");
+        return;
+      }
+      const name = document.getElementById("passkey-name").value.trim();
+      try {
+        const beginRes = await fetch("/auth/passkey/register/begin", { method: "POST" });
+        const beginData = await beginRes.json();
+        if (!beginRes.ok) {
+          showStatus(beginData.error || "Unable to start registration", "error");
+          return;
+        }
+        const publicKey = beginData.publicKey;
+        publicKey.challenge = b64urlToBuf(publicKey.challenge);
+        publicKey.user.id = b64urlToBuf(publicKey.user.id);
+        if (publicKey.excludeCredentials) {
+          publicKey.excludeCredentials = publicKey.excludeCredentials.map((c) => ({
+            ...c,
+            id: b64urlToBuf(c.id),
+          }));
+        }
+
+        const cred = await navigator.credentials.create({ publicKey });
+        const payload = {
+          id: cred.id,
+          rawId: bufToB64url(cred.rawId),
+          type: cred.type,
+          response: {
+            attestationObject: bufToB64url(cred.response.attestationObject),
+            clientDataJSON: bufToB64url(cred.response.clientDataJSON),
+          },
+        };
+
+        const finishRes = await fetch("/auth/passkey/register/finish?name=" + encodeURIComponent(name), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const finishData = await finishRes.json().catch(() => ({}));
+        if (!finishRes.ok) {
+          showStatus(finishData.error || "Failed to register passkey", "error");
+          return;
+        }
+        document.getElementById("passkey-name").value = "";
+        showStatus("Passkey registered successfully.", "success");
+        loadMe();
+      } catch (err) {
+        showStatus(err.name === "NotAllowedError" ? "Passkey registration cancelled." : err.message, "error");
+      }
+    });
+
+    document.getElementById("password-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const newPassword = document.getElementById("new-password").value;
+      const res = await fetch("/auth/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: newPassword }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showStatus(data.error || "Password update failed", "error");
+        return;
+      }
+      document.getElementById("new-password").value = "";
+      showStatus("Password updated.", "success");
+    });
+
+    document.getElementById("logout-btn").addEventListener("click", async () => {
+      await fetch("/auth/logout", { method: "POST" });
+      window.location.href = "/login";
+    });
+
+    loadMe();
+  </script>
+</body>
+</html>

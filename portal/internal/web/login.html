@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KubeTorrent — Sign In</title>
+  <link rel="stylesheet" href="/portal/styles.css" />
+</head>
+<body>
+  <main class="card">
+    <div class="brand">
+      <div class="brand-icon">KT</div>
+      <h1>KubeTorrent</h1>
+    </div>
+    <p class="subtitle">Sign in to access your isolated torrent client over WireGuard.</p>
+
+    <form id="password-form">
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username webauthn" required />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required />
+      </div>
+      <button type="submit" class="btn btn-primary">Sign in with Password</button>
+    </form>
+
+    <div class="divider">or</div>
+
+    <button id="passkey-btn" type="button" class="btn btn-secondary">
+      Sign in with Passkey
+    </button>
+
+    <div id="status" class="status" role="alert"></div>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    function showStatus(msg, type) {
+      statusEl.textContent = msg;
+      statusEl.className = "status " + type;
+    }
+
+    function b64urlToBuf(b64url) {
+      const pad = "=".repeat((4 - (b64url.length % 4)) % 4);
+      const b64 = (b64url + pad).replace(/-/g, "+").replace(/_/g, "/");
+      const bin = atob(b64);
+      const buf = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+      return buf.buffer;
+    }
+
+    function bufToB64url(buf) {
+      const bytes = new Uint8Array(buf);
+      let bin = "";
+      for (const b of bytes) bin += String.fromCharCode(b);
+      return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    }
+
+    document.getElementById("password-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      showStatus("", "");
+      statusEl.className = "status";
+
+      const username = document.getElementById("username").value.trim();
+      const password = document.getElementById("password").value;
+
+      try {
+        const res = await fetch("/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username, password }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showStatus(data.error || "Sign in failed", "error");
+          return;
+        }
+        window.location.href = data.redirect || "/";
+      } catch (err) {
+        showStatus("Network error: " + err.message, "error");
+      }
+    });
+
+    document.getElementById("passkey-btn").addEventListener("click", async () => {
+      if (!window.PublicKeyCredential) {
+        showStatus("Passkeys are not supported in this browser.", "error");
+        return;
+      }
+
+      const username = document.getElementById("username").value.trim();
+      try {
+        const beginRes = await fetch("/auth/passkey/login/begin", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username }),
+        });
+        const beginData = await beginRes.json();
+        if (!beginRes.ok) {
+          showStatus(beginData.error || "Unable to start Passkey login", "error");
+          return;
+        }
+
+        const publicKey = beginData.publicKey;
+        publicKey.challenge = b64urlToBuf(publicKey.challenge);
+        if (publicKey.allowCredentials) {
+          publicKey.allowCredentials = publicKey.allowCredentials.map((c) => ({
+            ...c,
+            id: b64urlToBuf(c.id),
+          }));
+        }
+
+        const assertion = await navigator.credentials.get({ publicKey });
+        const payload = {
+          id: assertion.id,
+          rawId: bufToB64url(assertion.rawId),
+          type: assertion.type,
+          response: {
+            authenticatorData: bufToB64url(assertion.response.authenticatorData),
+            clientDataJSON: bufToB64url(assertion.response.clientDataJSON),
+            signature: bufToB64url(assertion.response.signature),
+            userHandle: assertion.response.userHandle ? bufToB64url(assertion.response.userHandle) : null,
+          },
+        };
+
+        const finishRes = await fetch("/auth/passkey/login/finish", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const finishData = await finishRes.json().catch(() => ({}));
+        if (!finishRes.ok) {
+          showStatus(finishData.error || "Passkey verification failed", "error");
+          return;
+        }
+        window.location.href = finishData.redirect || "/";
+      } catch (err) {
+        if (err.name === "NotAllowedError") {
+          showStatus("Passkey prompt was cancelled.", "error");
+        } else {
+          showStatus("Passkey error: " + err.message, "error");
+        }
+      }
+    });
+  </script>
+</body>
+</html>

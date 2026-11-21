@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubetorrent-users
+  namespace: kubetorrent
+data:
+  users.json: |
+    [
+      {
+        "username": "alice",
+        "port": 8081,
+        "initial_password": "changeme-alice"
+      },
+      {
+        "username": "bob",
+        "port": 8082,
+        "initial_password": "changeme-bob"
+      }
+    ]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kubetorrent-portal-config
+  namespace: kubetorrent
+data:
+  RP_ID: "torrent.example.com"
+  RP_ORIGINS: "https://torrent.example.com"
+  RP_DISPLAY_NAME: "KubeTorrent"
+  BACKEND_HOST: "http://kubetorrent-clients.kubetorrent.svc.cluster.local"
+  DATA_DIR: "/data/portal"
+  COOKIE_SECURE: "true"
