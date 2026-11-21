@@ -102,3 +102,6 @@ spec:
           hostPath:
             path: /dev/net/tun
             type: CharDevice
+        - name: wireguard-config
+          secret:
+            secretName: wireguard-config

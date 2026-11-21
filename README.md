@@ -43,7 +43,7 @@ Run the interactive setup script or edit the manifests directly:
 ```
 
 Or manually update:
-- `k8s/base/secret-wireguard.yaml` with your WireGuard keys, endpoint, and address.
+- `k8s/base/secret-wireguard.yaml` with your `wg-proton.conf` contents (mounted into `gluetun` at `/gluetun/wireguard/wg0.conf`).
 - `k8s/base/secret-portal.yaml` with `openssl rand -hex 32`.
 - `RP_ID`, `RP_ORIGINS`, `HOST_DOWNLOADS_PATH` in `k8s/base/configmap-users.yaml` and the host in `k8s/base/ingress.yaml` (Passkeys/WebAuthn require HTTPS or `localhost`).
 
