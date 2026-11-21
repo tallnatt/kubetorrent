@@ -2,10 +2,10 @@
 
 Multi-user BitTorrent web client setup for Kubernetes featuring:
 
-- **Single WireGuard Tunnel for All BitTorrent Traffic**: A single Pod (`kubetorrent-clients`) runs `gluetun` (WireGuard + `iptables` kill-switch) alongside per-user `qbittorrent` containers sharing the Pod network namespace. All BitTorrent peer/tracker/DHT traffic is forced through WireGuard, while WebUI traffic stays inside the cluster.
-- **Separate Login Landing Page (Password + Passkey / WebAuthn)**: `kubetorrent-portal` runs outside the VPN tunnel, serves `/login` (Username/Password + Passkey sign-in) and `/account` (Passkey registration & password management), and reverse-proxies authenticated users to their isolated qBittorrent WebUI.
-- **Persistent & User-Segregated Downloads on Host Storage**: Each user's qBittorrent config/resume state is stored on a PVC (`subPath: <user>`), and downloaded files are written to a node `hostPath` directory (`/srv/kubetorrent/downloads/<user>`), mounted at `/downloads` inside each user's container.
-- **Kustomize Manifests**: Base manifests in `k8s/base/` and an example local overlay in `k8s/overlays/local/`.
+- **Single WireGuard Gateway Tunnel**: A dedicated `kubetorrent-vpn-gateway` Pod runs `gluetun` (WireGuard + kill-switch) and `pod-gateway` (VXLAN router). Each user's `qbittorrent` Pod routes all external peer/tracker/DHT traffic through this single WireGuard tunnel while keeping cluster-internal WebUI traffic off the VPN.
+- **Separate Login Landing Page (Password + Passkey / WebAuthn)**: `kubetorrent-portal` runs outside the WireGuard tunnel, serves `/login` (Username/Password + Passkey sign-in) and `/account` (Passkey registration & password management), and reverse-proxies authenticated users to their own `kubetorrent-client-<user>` Pod.
+- **Admin Console (`/admin`) with Zero-Downtime Pod Provisioning**: Admins can create/delete users (automatically provisioning or removing their isolated `Deployment` and `Service` via Kubernetes API without restarting other users' Pods), reset passwords, and revoke Passkeys.
+- **Persistent & User-Segregated Downloads on Host Storage**: Each user's qBittorrent config/resume state is stored on the `kubetorrent-configs` PVC (`subPath: <user>`), and downloaded files are stored on the host at `/srv/kubetorrent/downloads/<user>` (`hostPath` with `subPath: <user>`).
 
 ## Architecture
 
@@ -14,39 +14,40 @@ Browser (HTTPS)
    │
    ▼
 Ingress ──▶ kubetorrent-portal (outside WireGuard)
-               │  • /login  (Password + Passkey)
+               │  • /login   (Password + Passkey)
                │  • /account (Manage Passkeys & Password)
-               │  • /*      (Reverse proxy per authenticated user)
+               │  • /admin   (Provision/Delete User Pods)
+               │  • /*       (Reverse proxy to user's Pod :8080)
                ▼
-        kubetorrent-clients Pod (NetworkPolicy-restricted)
-         ├── wireguard (gluetun + iptables kill-switch)
-         ├── qbittorrent-alice (:8081, /downloads -> hostPath/alice)
-         └── qbittorrent-bob   (:8082, /downloads -> hostPath/bob)
+   ┌───────────────────────────┬───────────────────────────┐
+   ▼                           ▼                           ▼
+kubetorrent-client-alice    kubetorrent-client-bob    (provisioned via /admin)
+(hostPath/alice)            (hostPath/bob)
+   │                           │
+   └───────────┬───────────────┘  (VXLAN UDP 4789)
+               ▼
+      kubetorrent-vpn-gateway (gluetun WireGuard + pod-gateway)
                │
-               ▼ (all external traffic via WireGuard wg0)
+               ▼ (all external torrent traffic via wg0)
            Internet
 ```
 
 ## Quick Start
 
-### 1. Build the Portal Image
+### 1. Configure Secrets & Domain
+
+Run the interactive setup script or edit the manifests directly:
 
 ```bash
-cd portal
-docker build -t ghcr.io/tallnatt/kubetorrent-portal:latest .
+./scripts/configure.sh
 ```
 
-### 2. Configure Secrets & Domain
+Or manually update:
+- `k8s/base/secret-wireguard.yaml` with your WireGuard keys, endpoint, and address.
+- `k8s/base/secret-portal.yaml` with `openssl rand -hex 32`.
+- `RP_ID`, `RP_ORIGINS`, `HOST_DOWNLOADS_PATH` in `k8s/base/configmap-users.yaml` and the host in `k8s/base/ingress.yaml` (Passkeys/WebAuthn require HTTPS or `localhost`).
 
-1. Update `k8s/base/secret-wireguard.yaml` with your WireGuard provider's keys, endpoint, and address.
-2. Generate a random session secret for `k8s/base/secret-portal.yaml`:
-   ```bash
-   openssl rand -hex 32
-   ```
-3. Update `RP_ID` and `RP_ORIGINS` in `k8s/base/configmap-users.yaml` and the host in `k8s/base/ingress.yaml` to match your domain (Passkeys/WebAuthn require HTTPS or `localhost`).
-4. Set the host directory path in `k8s/base/clients-deployment.yaml` (default: `/srv/kubetorrent/downloads`).
-
-### 3. Deploy with Kustomize
+### 2. Deploy with Kustomize
 
 ```bash
 kubectl apply -k k8s/base
@@ -58,18 +59,11 @@ For local testing (`localhost`, `COOKIE_SECURE=false`, `/tmp/kubetorrent-downloa
 kubectl apply -k k8s/overlays/local
 ```
 
-### 4. Register a Passkey
+### 3. Provision Users & Register Passkeys
 
-1. Sign in at `/login` using a configured username and `initial_password` (from `users.json`).
-2. Visit `/account` to register one or more Passkeys (Touch ID, Windows Hello, YubiKey, etc.) and change your password.
-3. On future visits to `/login`, click **Sign in with Passkey**.
-
-## Adding Users
-
-To add a new user (e.g., `charlie` on WebUI port `8083` and torrent port `6883`):
-1. Add `{ "username": "charlie", "port": 8083, "initial_password": "..." }` to `k8s/base/configmap-users.yaml`.
-2. Add a `qbittorrent-charlie` container (and `seed_user charlie 8083 6883` in the init container) to `k8s/base/clients-deployment.yaml`.
-3. Add `8083` to `FIREWALL_INPUT_PORTS` in `clients-deployment.yaml`, `services.yaml`, and `networkpolicy.yaml`.
+1. Sign in at `/login` with the `admin` account (`changeme-admin` by default — change it immediately at `/account`).
+2. Visit `/admin` to create/delete users (each non-admin user automatically gets an isolated `kubetorrent-client-<user>` Pod & Service) or reset passwords/passkeys.
+3. Users can sign in at `/login` and visit `/account` to register Passkeys (Touch ID, Windows Hello, YubiKey, etc.).
 
 ## Running Portal Tests
 

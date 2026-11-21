@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>KubeTorrent — Admin Provisioning</title>
+  <link rel="stylesheet" href="/portal/styles.css" />
+</head>
+<body>
+  <main class="card card-wide">
+    <div class="header-row">
+      <div class="brand" style="margin-bottom:0">
+        <div class="brand-icon">KT</div>
+        <div>
+          <h1>Admin Console</h1>
+          <p class="subtitle" style="margin-bottom:0">Provision per-user Pods, reset passwords, and revoke Passkeys</p>
+        </div>
+      </div>
+      <div style="display:flex; gap:8px">
+        <a href="/account" class="btn btn-secondary" style="width:auto">Account</a>
+        <button id="logout-btn" class="btn btn-secondary" style="width:auto">Sign Out</button>
+      </div>
+    </div>
+
+    <div class="section" style="margin-top:0; border-top:none; padding-top:0">
+      <h2>Create User &amp; Torrent Pod</h2>
+      <form id="create-user-form">
+        <div class="inline-form" style="margin-bottom:10px">
+          <input id="new-username" type="text" placeholder="Username (lowercase, e.g. charlie)" pattern="[a-z0-9][a-z0-9-]{0,30}[a-z0-9]?" required />
+          <input id="new-password" type="password" placeholder="Initial password (min 8 chars)" minlength="8" required />
+        </div>
+        <div class="inline-form" style="align-items:center; justify-content:space-between">
+          <label style="display:flex; align-items:center; gap:8px; margin-bottom:0; cursor:pointer">
+            <input id="new-is-admin" type="checkbox" /> Admin only (no torrent Pod)
+          </label>
+          <button type="submit" class="btn btn-primary" style="width:auto">Provision User</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="section">
+      <h2>Users</h2>
+      <div id="user-list" class="passkey-list"></div>
+    </div>
+
+    <div id="status" class="status" role="alert"></div>
+  </main>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    function showStatus(msg, type) {
+      statusEl.textContent = msg;
+      statusEl.className = "status " + type;
+    }
+
+    async function loadUsers() {
+      const res = await fetch("/admin/api/users");
+      if (res.status === 401 || res.status === 403) {
+        window.location.href = "/login";
+        return;
+      }
+      const data = await res.json();
+      const listEl = document.getElementById("user-list");
+      listEl.innerHTML = "";
+
+      for (const u of data.users || []) {
+        const item = document.createElement("div");
+        item.className = "passkey-item";
+        item.style.flexDirection = "column";
+        item.style.alignItems = "stretch";
+        item.style.gap = "10px";
+
+        const top = document.createElement("div");
+        top.style.display = "flex";
+        top.style.justifyContent = "space-between";
+        top.style.alignItems = "center";
+
+        const info = document.createElement("div");
+        const title = document.createElement("div");
+        title.textContent = u.username + (u.is_admin ? " (admin)" : "");
+        const meta = document.createElement("div");
+        meta.className = "passkey-meta";
+        meta.textContent = u.is_admin
+          ? `Passkeys: ${u.passkey_count}`
+          : `Pod: ${u.pod_status} · Passkeys: ${u.passkey_count}`;
+        info.appendChild(title);
+        info.appendChild(meta);
+
+        const actions = document.createElement("div");
+        actions.style.display = "flex";
+        actions.style.gap = "8px";
+
+        const resetBtn = document.createElement("button");
+        resetBtn.className = "btn btn-secondary";
+        resetBtn.style.width = "auto";
+        resetBtn.style.padding = "6px 10px";
+        resetBtn.style.fontSize = "12px";
+        resetBtn.textContent = "Reset Password";
+        resetBtn.onclick = async () => {
+          const pw = prompt(`Enter new password for ${u.username} (min 8 chars):`);
+          if (!pw) return;
+          const r = await fetch(`/admin/api/users/${encodeURIComponent(u.username)}/password`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: pw }),
+          });
+          const d = await r.json().catch(() => ({}));
+          if (r.ok) {
+            showStatus(`Password reset for ${u.username}.`, "success");
+          } else {
+            showStatus(d.error || "Failed to reset password.", "error");
+          }
+        };
+        actions.appendChild(resetBtn);
+
+        if (u.passkey_count > 0) {
+          const revokeBtn = document.createElement("button");
+          revokeBtn.className = "btn btn-secondary";
+          revokeBtn.style.width = "auto";
+          revokeBtn.style.padding = "6px 10px";
+          revokeBtn.style.fontSize = "12px";
+          revokeBtn.textContent = "Revoke Passkeys";
+          revokeBtn.onclick = async () => {
+            const r = await fetch(`/admin/api/users/${encodeURIComponent(u.username)}/passkeys/revoke`, {
+              method: "POST",
+            });
+            if (r.ok) {
+              showStatus(`Passkeys revoked for ${u.username}.`, "success");
+              loadUsers();
+            } else {
+              showStatus("Failed to revoke passkeys.", "error");
+            }
+          };
+          actions.appendChild(revokeBtn);
+        }
+
+        if (!u.is_self) {
+          const delBtn = document.createElement("button");
+          delBtn.className = "btn btn-danger";
+          delBtn.textContent = "Delete";
+          delBtn.onclick = async () => {
+            if (!confirm(`Delete user ${u.username} and their torrent Pod? (Downloaded host files are preserved)`)) return;
+            const r = await fetch(`/admin/api/users/${encodeURIComponent(u.username)}`, { method: "DELETE" });
+            if (r.ok) {
+              showStatus(`Deleted ${u.username}.`, "success");
+              loadUsers();
+            } else {
+              const d = await r.json().catch(() => ({}));
+              showStatus(d.error || "Delete failed.", "error");
+            }
+          };
+          actions.appendChild(delBtn);
+        }
+
+        top.appendChild(info);
+        top.appendChild(actions);
+        item.appendChild(top);
+        listEl.appendChild(item);
+      }
+    }
+
+    document.getElementById("create-user-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const username = document.getElementById("new-username").value.trim();
+      const password = document.getElementById("new-password").value;
+      const isAdmin = document.getElementById("new-is-admin").checked;
+
+      const res = await fetch("/admin/api/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password, is_admin: isAdmin }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showStatus(data.error || "Provisioning failed", "error");
+        return;
+      }
+      document.getElementById("new-username").value = "";
+      document.getElementById("new-password").value = "";
+      document.getElementById("new-is-admin").checked = false;
+      showStatus(`Provisioned ${username}.`, "success");
+      loadUsers();
+    });
+
+    document.getElementById("logout-btn").addEventListener("click", async () => {
+      await fetch("/auth/logout", { method: "POST" });
+      window.location.href = "/login";
+    });
+
+    loadUsers();
+  </script>
+</body>
+</html>

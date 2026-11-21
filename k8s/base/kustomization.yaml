@@ -5,12 +5,13 @@ namespace: kubetorrent
 
 resources:
   - namespace.yaml
+  - rbac-portal.yaml
   - configmap-users.yaml
   - secret-wireguard.yaml
   - secret-portal.yaml
   - pvc.yaml
   - portal-deployment.yaml
-  - clients-deployment.yaml
+  - vpn-gateway-deployment.yaml
   - services.yaml
   - networkpolicy.yaml
   - ingress.yaml

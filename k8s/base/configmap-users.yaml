@@ -7,13 +7,16 @@ data:
   users.json: |
     [
       {
+        "username": "admin",
+        "initial_password": "changeme-admin",
+        "is_admin": true
+      },
+      {
         "username": "alice",
-        "port": 8081,
         "initial_password": "changeme-alice"
       },
       {
         "username": "bob",
-        "port": 8082,
         "initial_password": "changeme-bob"
       }
     ]
@@ -27,6 +30,10 @@ data:
   RP_ID: "torrent.example.com"
   RP_ORIGINS: "https://torrent.example.com"
   RP_DISPLAY_NAME: "KubeTorrent"
-  BACKEND_HOST: "http://kubetorrent-clients.kubetorrent.svc.cluster.local"
+  K8S_NAMESPACE: "kubetorrent"
+  GATEWAY_HOST: "kubetorrent-vpn-gateway.kubetorrent.svc.cluster.local"
+  HOST_DOWNLOADS_PATH: "/srv/kubetorrent/downloads"
+  CONFIGS_PVC_NAME: "kubetorrent-configs"
+  NOT_ROUTED_TO_GATEWAY_CIDRS: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
   DATA_DIR: "/data/portal"
   COOKIE_SECURE: "true"

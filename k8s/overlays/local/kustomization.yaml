@@ -4,9 +4,6 @@ kind: Kustomization
 resources:
   - ../../base
 
-patches:
-  - path: hostpath-patch.yaml
-
 configMapGenerator:
   - name: kubetorrent-portal-config
     behavior: merge
@@ -14,3 +11,4 @@ configMapGenerator:
       - RP_ID=localhost
       - RP_ORIGINS=http://localhost:8080
       - COOKIE_SECURE=false
+      - HOST_DOWNLOADS_PATH=/tmp/kubetorrent-downloads

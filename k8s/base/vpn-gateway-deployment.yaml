@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubetorrent-vpn-gateway
+  namespace: kubetorrent
+  labels:
+    app.kubernetes.io/name: kubetorrent-vpn-gateway
+    app.kubernetes.io/component: vpn-gateway
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kubetorrent-vpn-gateway
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kubetorrent-vpn-gateway
+        app.kubernetes.io/component: vpn-gateway
+    spec:
+      containers:
+        - name: wireguard
+          image: qmcgaw/gluetun:v3.40
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          env:
+            - name: VPN_SERVICE_PROVIDER
+              value: "custom"
+            - name: VPN_TYPE
+              value: "wireguard"
+            - name: FIREWALL_OUTBOUND_SUBNETS
+              value: "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+            - name: HEALTH_SERVER_ADDRESS
+              value: "127.0.0.1:9999"
+          envFrom:
+            - secretRef:
+                name: wireguard-config
+          volumeMounts:
+            - name: dev-net-tun
+              mountPath: /dev/net/tun
+          livenessProbe:
+            exec:
+              command: ["/gluetun-entrypoint", "healthcheck"]
+            initialDelaySeconds: 15
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command: ["/gluetun-entrypoint", "healthcheck"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+
+        - name: pod-gateway
+          image: ghcr.io/angelnu/pod-gateway:v1.13.0
+          securityContext:
+            capabilities:
+              add:
+                - NET_ADMIN
+          env:
+            - name: VXLAN_ID
+              value: "42"
+            - name: VXLAN_IP_NETWORK
+              value: "172.29.0"
+            - name: VXLAN_GATEWAY_FIRST_DYNAMIC_IP
+              value: "20"
+            - name: VPN_INTERFACE
+              value: "tun0"
+            - name: VPN_BLOCK_OTHER_TRAFFIC
+              value: "true"
+            - name: VPN_LOCAL_CIDRS
+              value: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+            - name: NOT_ROUTED_TO_GATEWAY_CIDRS
+              value: "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"
+            - name: DNS_LOCAL_CIDRS
+              value: "cluster.local"
+          ports:
+            - name: vxlan
+              containerPort: 4789
+              protocol: UDP
+            - name: dns-udp
+              containerPort: 53
+              protocol: UDP
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+
+      volumes:
+        - name: dev-net-tun
+          hostPath:
+            path: /dev/net/tun
+            type: CharDevice

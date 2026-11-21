@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,17 +14,19 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/tallnatt/kubetorrent/portal/internal/auth"
 	"github.com/tallnatt/kubetorrent/portal/internal/config"
+	"github.com/tallnatt/kubetorrent/portal/internal/k8s"
 	"github.com/tallnatt/kubetorrent/portal/internal/proxy"
 	"github.com/tallnatt/kubetorrent/portal/internal/store"
 	"github.com/tallnatt/kubetorrent/portal/internal/web"
 )
 
 type Server struct {
-	cfg     *config.Config
-	store   *store.Store
-	authMgr *auth.Manager
-	wa      *webauthn.WebAuthn
-	proxy   *proxy.Router
+	cfg         *config.Config
+	store       *store.Store
+	authMgr     *auth.Manager
+	wa          *webauthn.WebAuthn
+	proxy       *proxy.Router
+	provisioner k8s.Provisioner
 }
 
 func main() {
@@ -42,12 +45,28 @@ func main() {
 		log.Fatalf("init webauthn: %v", err)
 	}
 
+	prov, err := k8s.NewProvisioner(cfg)
+	if err != nil {
+		log.Printf("Kubernetes in-cluster client unavailable (%v); using noop provisioner", err)
+		prov = k8s.NoopProvisioner{}
+	}
+
 	srv := &Server{
-		cfg:     cfg,
-		store:   st,
-		authMgr: auth.NewManager(cfg.SessionSecret, cfg.CookieSecure),
-		wa:      wa,
-		proxy:   proxy.NewRouter(),
+		cfg:         cfg,
+		store:       st,
+		authMgr:     auth.NewManager(cfg.SessionSecret, cfg.CookieSecure),
+		wa:          wa,
+		proxy:       proxy.NewRouter(),
+		provisioner: prov,
+	}
+
+	// Ensure configured non-admin users have their Kubernetes Pods & Services provisioned
+	for _, u := range st.ListUsers() {
+		if !u.IsAdmin && u.BackendURL != "" {
+			if err := prov.ProvisionUser(context.Background(), u.Username); err != nil {
+				log.Printf("WARN: failed to reconcile resources for %s: %v", u.Username, err)
+			}
+		}
 	}
 
 	mux := srv.routes()
@@ -57,7 +76,7 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("KubeTorrent Portal listening on %s (RPID=%s, users=%d)", cfg.ListenAddr, cfg.RPID, len(cfg.Users))
+	log.Printf("KubeTorrent Portal listening on %s (RPID=%s, namespace=%s)", cfg.ListenAddr, cfg.RPID, cfg.Namespace)
 	if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server error: %v", err)
 	}
@@ -83,6 +102,7 @@ func (s *Server) routes() http.Handler {
 
 	mux.HandleFunc("GET /login", s.handleLoginPage)
 	mux.HandleFunc("GET /account", s.handleAccountPage)
+	mux.HandleFunc("GET /admin", s.handleAdminPage)
 
 	mux.HandleFunc("POST /auth/login", s.handlePasswordLogin)
 	mux.HandleFunc("POST /auth/logout", s.handleLogout)
@@ -96,8 +116,29 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /auth/passkey/login/begin", s.handlePasskeyLoginBegin)
 	mux.HandleFunc("POST /auth/passkey/login/finish", s.handlePasskeyLoginFinish)
 
+	mux.HandleFunc("GET /admin/api/users", s.handleAdminListUsers)
+	mux.HandleFunc("POST /admin/api/users", s.handleAdminCreateUser)
+	mux.HandleFunc("DELETE /admin/api/users/{username}", s.handleAdminDeleteUser)
+	mux.HandleFunc("POST /admin/api/users/{username}/password", s.handleAdminResetPassword)
+	mux.HandleFunc("POST /admin/api/users/{username}/passkeys/revoke", s.handleAdminRevokePasskeys)
+
 	mux.HandleFunc("/", s.handleProxy)
 	return mux
+}
+
+func (s *Server) requireAdmin(r *http.Request) (*store.User, int, string) {
+	username, err := s.authMgr.GetSessionUser(r)
+	if err != nil {
+		return nil, http.StatusUnauthorized, "unauthorized"
+	}
+	user, err := s.store.GetByUsername(username)
+	if err != nil {
+		return nil, http.StatusUnauthorized, "user not found"
+	}
+	if !user.IsAdmin {
+		return nil, http.StatusForbidden, "admin access required"
+	}
+	return user, http.StatusOK, ""
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +169,25 @@ func (s *Server) handleAccountPage(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+func (s *Server) handleAdminPage(w http.ResponseWriter, r *http.Request) {
+	_, status, _ := s.requireAdmin(r)
+	if status == http.StatusUnauthorized {
+		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if status == http.StatusForbidden {
+		http.Error(w, "forbidden: admin access required", http.StatusForbidden)
+		return
+	}
+	data, err := fs.ReadFile(web.Assets, "admin.html")
+	if err != nil {
+		http.Error(w, "missing admin page", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(data)
+}
+
 func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
@@ -146,7 +206,11 @@ func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"redirect": "/"})
+	redirect := "/"
+	if user.IsAdmin && user.BackendURL == "" {
+		redirect = "/admin"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -180,6 +244,7 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username": user.Username,
+		"is_admin": user.IsAdmin,
 		"passkeys": pks,
 	})
 }
@@ -366,7 +431,148 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		writeJSONError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"redirect": "/"})
+	redirect := "/"
+	if loggedInUser.IsAdmin && loggedInUser.BackendURL == "" {
+		redirect = "/admin"
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"redirect": redirect})
+}
+
+func (s *Server) handleAdminListUsers(w http.ResponseWriter, r *http.Request) {
+	adminUser, status, msg := s.requireAdmin(r)
+	if status != http.StatusOK {
+		writeJSONError(w, status, msg)
+		return
+	}
+
+	type userView struct {
+		Username     string `json:"username"`
+		IsAdmin      bool   `json:"is_admin"`
+		IsSelf       bool   `json:"is_self"`
+		PasskeyCount int    `json:"passkey_count"`
+		PodStatus    string `json:"pod_status,omitempty"`
+	}
+
+	users := s.store.ListUsers()
+	views := make([]userView, 0, len(users))
+	for _, u := range users {
+		podStatus := ""
+		if !u.IsAdmin {
+			podStatus = s.provisioner.GetUserStatus(r.Context(), u.Username)
+		}
+		views = append(views, userView{
+			Username:     u.Username,
+			IsAdmin:      u.IsAdmin,
+			IsSelf:       u.Username == adminUser.Username,
+			PasskeyCount: len(u.Passkeys),
+			PodStatus:    podStatus,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"users": views})
+}
+
+func (s *Server) handleAdminCreateUser(w http.ResponseWriter, r *http.Request) {
+	_, status, msg := s.requireAdmin(r)
+	if status != http.StatusOK {
+		writeJSONError(w, status, msg)
+		return
+	}
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		IsAdmin  bool   `json:"is_admin"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+
+	backendURL := ""
+	if !req.IsAdmin {
+		backendURL = s.cfg.DefaultUserBackendURL(req.Username, 8080)
+	}
+	if _, err := s.store.CreateUser(req.Username, req.Password, backendURL, req.IsAdmin); err != nil {
+		code := http.StatusBadRequest
+		if errors.Is(err, store.ErrUserExists) {
+			code = http.StatusConflict
+		}
+		writeJSONError(w, code, err.Error())
+		return
+	}
+
+	if !req.IsAdmin {
+		if err := s.provisioner.ProvisionUser(r.Context(), req.Username); err != nil {
+			_ = s.store.DeleteUser(req.Username)
+			writeJSONError(w, http.StatusInternalServerError, "failed to provision Kubernetes Pod: "+err.Error())
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, map[string]string{"username": req.Username})
+}
+
+func (s *Server) handleAdminDeleteUser(w http.ResponseWriter, r *http.Request) {
+	adminUser, status, msg := s.requireAdmin(r)
+	if status != http.StatusOK {
+		writeJSONError(w, status, msg)
+		return
+	}
+	target := r.PathValue("username")
+	if target == adminUser.Username {
+		writeJSONError(w, http.StatusBadRequest, "cannot delete your own admin account")
+		return
+	}
+	u, err := s.store.GetByUsername(target)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if !u.IsAdmin {
+		if err := s.provisioner.DeprovisionUser(r.Context(), target); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "failed to delete Kubernetes Pod: "+err.Error())
+			return
+		}
+	}
+	if err := s.store.DeleteUser(target); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
+	_, status, msg := s.requireAdmin(r)
+	if status != http.StatusOK {
+		writeJSONError(w, status, msg)
+		return
+	}
+	target := r.PathValue("username")
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if err := s.store.UpdatePassword(target, req.Password); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+func (s *Server) handleAdminRevokePasskeys(w http.ResponseWriter, r *http.Request) {
+	_, status, msg := s.requireAdmin(r)
+	if status != http.StatusOK {
+		writeJSONError(w, status, msg)
+		return
+	}
+	target := r.PathValue("username")
+	if err := s.store.RevokePasskeys(target); err != nil {
+		writeJSONError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
 
 func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
@@ -383,6 +589,10 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.authMgr.ClearSessionCookie(w)
 		http.Redirect(w, r, "/login", http.StatusFound)
+		return
+	}
+	if user.IsAdmin && user.BackendURL == "" {
+		http.Redirect(w, r, "/admin", http.StatusFound)
 		return
 	}
 	s.proxy.ServeUser(w, r, user.BackendURL)

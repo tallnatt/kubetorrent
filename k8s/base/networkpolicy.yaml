@@ -6,7 +6,7 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: kubetorrent-clients
+      app.kubernetes.io/component: client
   policyTypes:
     - Ingress
   ingress:
@@ -16,6 +16,4 @@ spec:
               app.kubernetes.io/component: portal
       ports:
         - protocol: TCP
-          port: 8081
-        - protocol: TCP
-          port: 8082
+          port: 8080

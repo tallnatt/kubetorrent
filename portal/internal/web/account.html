@@ -77,6 +77,9 @@
       }
       const data = await res.json();
       document.getElementById("username-heading").textContent = data.username;
+      if (data.is_admin) {
+        document.getElementById("admin-link").style.display = "inline-flex";
+      }
       const listEl = document.getElementById("passkey-list");
       listEl.innerHTML = "";
       if (!data.passkeys || data.passkeys.length === 0) {

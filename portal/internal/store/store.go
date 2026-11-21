@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -17,7 +19,9 @@ import (
 
 var (
 	ErrUserNotFound      = errors.New("user not found")
+	ErrUserExists        = errors.New("user already exists")
 	ErrInvalidCredential = errors.New("invalid username or password")
+	validUsernameRe      = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 )
 
 type StoredCredential struct {
@@ -32,6 +36,7 @@ type User struct {
 	DisplayName  string             `json:"display_name"`
 	PasswordHash string             `json:"password_hash"`
 	BackendURL   string             `json:"backend_url"`
+	IsAdmin      bool               `json:"is_admin,omitempty"`
 	Passkeys     []StoredCredential `json:"passkeys"`
 }
 
@@ -151,11 +156,18 @@ func (s *Store) syncRoutes(routes []config.UserRoute) error {
 				DisplayName:  r.Username,
 				PasswordHash: hash,
 				BackendURL:   r.BackendURL,
+				IsAdmin:      r.IsAdmin,
 			}
 			changed = true
-		} else if r.BackendURL != "" && existing.BackendURL != r.BackendURL {
-			existing.BackendURL = r.BackendURL
-			changed = true
+		} else {
+			if r.BackendURL != "" && existing.BackendURL != r.BackendURL {
+				existing.BackendURL = r.BackendURL
+				changed = true
+			}
+			if r.IsAdmin && !existing.IsAdmin {
+				existing.IsAdmin = true
+				changed = true
+			}
 		}
 	}
 
@@ -163,6 +175,69 @@ func (s *Store) syncRoutes(routes []config.UserRoute) error {
 		return s.saveLocked()
 	}
 	return nil
+}
+
+func (s *Store) ListUsers() []*User {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	out := make([]*User, 0, len(s.users))
+	for _, u := range s.users {
+		out = append(out, cloneUser(u))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Username < out[j].Username
+	})
+	return out
+}
+
+func (s *Store) CreateUser(username, password, backendURL string, isAdmin bool) (*User, error) {
+	if !validUsernameRe.MatchString(username) {
+		return nil, errors.New("username must be 1-32 lowercase alphanumeric characters or hyphens")
+	}
+	if len(password) < 8 {
+		return nil, errors.New("password must be at least 8 characters")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return nil, err
+	}
+	id := make([]byte, 16)
+	if _, err := rand.Read(id); err != nil {
+		return nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.users[username]; exists {
+		return nil, ErrUserExists
+	}
+	u := &User{
+		ID:           id,
+		Username:     username,
+		DisplayName:  username,
+		PasswordHash: string(hash),
+		BackendURL:   backendURL,
+		IsAdmin:      isAdmin,
+	}
+	s.users[username] = u
+	if err := s.saveLocked(); err != nil {
+		delete(s.users, username)
+		return nil, err
+	}
+	return cloneUser(u), nil
+}
+
+func (s *Store) DeleteUser(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.users[username]; !exists {
+		return ErrUserNotFound
+	}
+	delete(s.users, username)
+	return s.saveLocked()
 }
 
 func (s *Store) GetByUsername(username string) (*User, error) {
@@ -279,6 +354,18 @@ func (s *Store) DeletePasskey(username string, credID []byte) error {
 		return errors.New("passkey not found")
 	}
 	u.Passkeys = filtered
+	return s.saveLocked()
+}
+
+func (s *Store) RevokePasskeys(username string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	u, ok := s.users[username]
+	if !ok {
+		return ErrUserNotFound
+	}
+	u.Passkeys = nil
 	return s.saveLocked()
 }
 
