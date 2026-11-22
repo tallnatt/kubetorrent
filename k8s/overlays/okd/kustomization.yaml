@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  - serviceaccount-vpn.yaml
+  - route-acme.yaml
+
+patches:
+  - path: vpn-sa-patch.yaml
+
+configMapGenerator:
+  - name: kubetorrent-portal-config
+    behavior: merge
+    literals:
+      - CLIENT_SERVICE_ACCOUNT=kubetorrent-vpn

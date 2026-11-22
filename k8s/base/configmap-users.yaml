@@ -30,6 +30,7 @@ data:
   RP_ID: "torrent.example.com"
   RP_ORIGINS: "https://torrent.example.com"
   RP_DISPLAY_NAME: "KubeTorrent"
+  LETSENCRYPT_EMAIL: "admin@example.com"
   K8S_NAMESPACE: "kubetorrent"
   GATEWAY_HOST: "kubetorrent-vpn-gateway.kubetorrent.svc.cluster.local"
   HOST_DOWNLOADS_PATH: "/srv/kubetorrent/downloads"

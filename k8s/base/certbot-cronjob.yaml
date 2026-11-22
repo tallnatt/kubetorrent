@@ -1,0 +1,148 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kubetorrent-certbot
+  namespace: kubetorrent
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubetorrent-certbot-tls
+  namespace: kubetorrent
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubetorrent-certbot-tls
+  namespace: kubetorrent
+subjects:
+  - kind: ServiceAccount
+    name: kubetorrent-certbot
+    namespace: kubetorrent
+roleRef:
+  kind: Role
+  name: kubetorrent-certbot-tls
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: kubetorrent-certbot-data
+  namespace: kubetorrent
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubetorrent-certbot
+  namespace: kubetorrent
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kubetorrent-certbot
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: kubetorrent-certbot-renew
+  namespace: kubetorrent
+spec:
+  schedule: "0 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: kubetorrent-certbot
+        spec:
+          serviceAccountName: kubetorrent-certbot
+          restartPolicy: OnFailure
+          containers:
+            - name: certbot
+              image: alpine:3.21
+              ports:
+                - containerPort: 8080
+              env:
+                - name: DOMAIN
+                  valueFrom:
+                    configMapKeyRef:
+                      name: kubetorrent-portal-config
+                      key: RP_ID
+                - name: LETSENCRYPT_EMAIL
+                  valueFrom:
+                    configMapKeyRef:
+                      name: kubetorrent-portal-config
+                      key: LETSENCRYPT_EMAIL
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  apk add --no-cache certbot curl jq >/dev/null
+
+                  certbot certonly \
+                    --standalone \
+                    --preferred-challenges http \
+                    --http-01-port 8080 \
+                    --non-interactive \
+                    --agree-tos \
+                    --keep-until-expiring \
+                    -m "${LETSENCRYPT_EMAIL}" \
+                    -d "${DOMAIN}" \
+                    --config-dir /etc/letsencrypt \
+                    --work-dir /tmp/certbot-work \
+                    --logs-dir /tmp/certbot-logs
+
+                  CRT_B64=$(base64 -w0 "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem")
+                  KEY_B64=$(base64 -w0 "/etc/letsencrypt/live/${DOMAIN}/privkey.pem")
+
+                  TOKEN=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)
+                  CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+                  API="https://kubernetes.default.svc/api/v1/namespaces/kubetorrent/secrets"
+
+                  PAYLOAD=$(jq -n --arg crt "$CRT_B64" --arg key "$KEY_B64" '{
+                    apiVersion: "v1",
+                    kind: "Secret",
+                    metadata: { name: "kubetorrent-tls", namespace: "kubetorrent" },
+                    type: "kubernetes.io/tls",
+                    data: { "tls.crt": $crt, "tls.key": $key }
+                  }')
+
+                  STATUS=$(curl -sS -o /dev/null -w "%{http_code}" --cacert "$CA" \
+                    -H "Authorization: Bearer $TOKEN" "${API}/kubetorrent-tls")
+
+                  if [ "$STATUS" = "200" ]; then
+                    curl -fsS --cacert "$CA" -X PUT \
+                      -H "Authorization: Bearer $TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d "$PAYLOAD" "${API}/kubetorrent-tls" >/dev/null
+                  else
+                    curl -fsS --cacert "$CA" -X POST \
+                      -H "Authorization: Bearer $TOKEN" \
+                      -H "Content-Type: application/json" \
+                      -d "$PAYLOAD" "${API}" >/dev/null
+                  fi
+                  echo "Updated Secret kubetorrent-tls for ${DOMAIN}"
+              volumeMounts:
+                - name: certbot-data
+                  mountPath: /etc/letsencrypt
+          volumes:
+            - name: certbot-data
+              persistentVolumeClaim:
+                claimName: kubetorrent-certbot-data

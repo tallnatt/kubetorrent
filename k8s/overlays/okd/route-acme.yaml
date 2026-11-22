@@ -1,0 +1,13 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: kubetorrent-acme
+  namespace: kubetorrent
+spec:
+  host: torrent.example.com
+  path: /.well-known/acme-challenge
+  to:
+    kind: Service
+    name: kubetorrent-certbot
+  port:
+    targetPort: http

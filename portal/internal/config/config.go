@@ -34,6 +34,7 @@ type Config struct {
 	NotRoutedCIDRs       string
 	VXLANID              string
 	VXLANNetwork         string
+	ClientServiceAccount string
 	AdminUsername        string
 	AdminInitialPassword string
 	CookieSecure         bool
@@ -55,6 +56,7 @@ func Load() (*Config, error) {
 		NotRoutedCIDRs:       getEnv("NOT_ROUTED_TO_GATEWAY_CIDRS", "10.0.0.0/8 172.16.0.0/12 192.168.0.0/16"),
 		VXLANID:              getEnv("VXLAN_ID", "42"),
 		VXLANNetwork:         getEnv("VXLAN_IP_NETWORK", "172.29.0"),
+		ClientServiceAccount: os.Getenv("CLIENT_SERVICE_ACCOUNT"),
 		AdminUsername:        getEnv("ADMIN_USERNAME", "admin"),
 		AdminInitialPassword: os.Getenv("ADMIN_INITIAL_PASSWORD"),
 	}
