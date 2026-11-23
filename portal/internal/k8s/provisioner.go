@@ -108,7 +108,6 @@ fi`, username)
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: p.cfg.ClientServiceAccount,
 					InitContainers: []corev1.Container{
 						{
 							Name:    "init-qbittorrent-config",

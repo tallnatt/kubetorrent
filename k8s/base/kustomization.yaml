@@ -14,5 +14,4 @@ resources:
   - vpn-gateway-deployment.yaml
   - services.yaml
   - networkpolicy.yaml
-  - certbot-cronjob.yaml
   - ingress.yaml
