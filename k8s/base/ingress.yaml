@@ -4,7 +4,6 @@ metadata:
   name: kubetorrent-ingress
   namespace: kubetorrent
   annotations:
-    # Adjust for your ingress controller / cert-manager issuer
     nginx.ingress.kubernetes.io/proxy-body-size: "64m"
 spec:
   tls:
@@ -15,6 +14,13 @@ spec:
     - host: torrent.example.com
       http:
         paths:
+          - path: /.well-known/acme-challenge
+            pathType: Prefix
+            backend:
+              service:
+                name: kubetorrent-certbot
+                port:
+                  name: http
           - path: /
             pathType: Prefix
             backend:

@@ -34,26 +34,21 @@ kubetorrent-client-alice    kubetorrent-client-bob    (provisioned via /admin)
 
 ## Quick Start
 
-### 1. Configure Secrets & Domain
+### 1. Configure & Deploy (with Let's Encrypt TLS)
 
-Run the interactive setup script or edit the manifests directly:
+Run the setup script from a machine with `kubectl` access:
 
 ```bash
 ./scripts/configure.sh
 ```
 
-Or manually update:
-- `k8s/base/secret-wireguard.yaml` with your `wg-proton.conf` contents (mounted into `gluetun` at `/gluetun/wireguard/wg0.conf`).
-- `k8s/base/secret-portal.yaml` with `openssl rand -hex 32`.
-- `RP_ID`, `RP_ORIGINS`, `HOST_DOWNLOADS_PATH` in `k8s/base/configmap-users.yaml` and the host in `k8s/base/ingress.yaml` (Passkeys/WebAuthn require HTTPS or `localhost`).
+The script will:
+1. Prompt for your domain, Let's Encrypt email, and path to `wg-proton.conf`.
+2. Generate `SESSION_SECRET` and `k8s/base/secret-wireguard.yaml`.
+3. Apply `k8s/base`.
+4. Trigger Certbot (`kubetorrent-certbot-renew` CronJob) to issue your initial Let's Encrypt certificate into `Secret/kubetorrent-tls` (and auto-renew daily).
 
-### 2. Deploy with Kustomize
-
-```bash
-kubectl apply -k k8s/base
-```
-
-For local testing (`localhost`, `COOKIE_SECURE=false`, `/tmp/kubetorrent-downloads`):
+For local testing without Let's Encrypt (`localhost`, `COOKIE_SECURE=false`, `/tmp/kubetorrent-downloads`):
 
 ```bash
 kubectl apply -k k8s/overlays/local
